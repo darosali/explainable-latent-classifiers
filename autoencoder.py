@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.notebook import tqdm
+import xgboost as xgb
 
 class Encoder(nn.Module):
     def __init__(self, input_dim, hidden_layers, latent_dim, activation=nn.Tanh):
@@ -48,11 +49,34 @@ class Autoencoder(nn.Module):
         return x_hat
         
     def encode(self, x):
-        """Get latent space representation"""
         return self.encoder(x)
+
+class Classifier(nn.Module):
+    """Classifier that predicts labels from latent space"""
+    def __init__(self, latent_dim, num_classes, hidden_layers=[8], activation=nn.ReLU):
+        super(Classifier, self).__init__()
+        layers = []
+        prev_dim = latent_dim
+        for hidden_dim in hidden_layers:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(activation())
+            prev_dim = hidden_dim
+        layers.append(nn.Linear(prev_dim, num_classes)) 
+        self.network = nn.Sequential(*layers)
+    
+    def forward(self, z):
+        return self.network(z)
 
 def reconstruction_loss(x, x_hat):
     return nn.MSELoss()(x_hat, x)
+
+def classification_loss(y_pred, y_true, class_weights=None):
+    if class_weights is not None:
+        loss_fn = nn.CrossEntropyLoss(weight=class_weights)
+    else:
+        loss_fn = nn.CrossEntropyLoss()
+    
+    return loss_fn(y_pred, y_true)
 
 def train(train_loader, val_loader, input_dim, hidden_layers, latent_dim, epochs=10, lr=0.001):
     autoencoder = Autoencoder(input_dim, hidden_layers, latent_dim)
@@ -92,3 +116,56 @@ def train(train_loader, val_loader, input_dim, hidden_layers, latent_dim, epochs
     
     return autoencoder
 
+def train_classifier(latent_train, y_train, latent_val, y_val, latent_dim, num_classes, epochs=10, lr=0.001, class_weights=None):
+    train_dataset = TensorDataset(latent_train, y_train)
+    val_dataset = TensorDataset(latent_val, y_val)
+    
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=128)
+
+    classifier = Classifier(latent_dim, num_classes)
+    optimizer = optim.AdamW(classifier.parameters(), lr=lr, weight_decay=0.001)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    
+    for epoch in range(epochs):
+        classifier.train()
+        total_train_loss = 0.0
+        train_progress = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Training Classifier]")
+        
+        for z, y in train_progress:
+            y_pred = classifier(z)
+            loss = criterion(y_pred, y)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_train_loss += loss.item()
+            train_progress.set_postfix(loss=loss.item())
+        
+        avg_train_loss = total_train_loss / len(train_loader)
+        
+        # Validation loss
+        classifier.eval()
+        total_val_loss = 0.0
+        with torch.no_grad():
+            for z, y in val_loader:
+                y_pred = classifier(z)
+                loss = criterion(y_pred, y)
+                total_val_loss += loss.item()
+        
+        avg_val_loss = total_val_loss / len(val_loader)
+        
+        print(f"Epoch {epoch+1}: Train Class Loss = {avg_train_loss:.4f}, Val Class Loss = {avg_val_loss:.4f}")
+    
+    return classifier
+
+    def train_xgboost_classifier(latent_train, y_train, latent_val, y_val):
+        model = xgb.XGBClassifier(
+            objective="multi:softmax",
+            num_class=len(np.unique(y_train)),
+            eval_metric="mlogloss",
+            use_label_encoder=False
+        )
+        
+        model.fit(latent_train, y_train, eval_set=[(latent_val, y_val)], verbose=True)
+        return model
