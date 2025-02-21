@@ -112,7 +112,7 @@ def sample_data(X, y, n_samples=2000, anomaly_ratio=0.3, random_seed=42):
     X_shap = X[selected_indices]
     y_shap = y[selected_indices]
 
-    return X_shap, y_shap
+    return X_shap, y_shap, selected_indices
 
 
 def get_shap_explanations(model, X_train, X_shap, feature_names, filename='output/shap_summary.png'):
