@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.notebook import tqdm
 import xgboost as xgb
+import numpy as np
 
 class Encoder(nn.Module):
     def __init__(self, input_dim, hidden_layers, latent_dim, activation=nn.Tanh):
@@ -52,8 +53,7 @@ class Autoencoder(nn.Module):
         return self.encoder(x)
 
 class Classifier(nn.Module):
-    """Classifier that predicts labels from latent space"""
-    def __init__(self, latent_dim, num_classes, hidden_layers=[8], activation=nn.ReLU):
+    def __init__(self, latent_dim, num_classes, hidden_layers=[16], activation=nn.ReLU):
         super(Classifier, self).__init__()
         layers = []
         prev_dim = latent_dim
@@ -79,6 +79,13 @@ class CombinedModel(nn.Module):
         x_hat = self.decoder(z)
         y_pred = self.classifier(z)
         return x_hat, y_pred, z
+        
+    def predict(self, x):
+        with torch.no_grad():
+            z = self.encoder(x)
+            pred = self.classifier(z)
+            pred = torch.argmax(pred)
+        return pred
 
 def combined_loss(x, x_hat, y_pred, y_true, alpha=0.5, class_weight=None):
     recon_loss = nn.MSELoss()(x_hat, x)  # reconstruction loss
@@ -138,8 +145,8 @@ def train_classifier(latent_train, y_train, latent_val, y_val, latent_dim, num_c
     train_dataset = TensorDataset(latent_train, y_train)
     val_dataset = TensorDataset(latent_val, y_val)
     
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=128)
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=256)
 
     classifier = Classifier(latent_dim, num_classes)
     optimizer = optim.AdamW(classifier.parameters(), lr=lr, weight_decay=0.001)
