@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.notebook import tqdm
+from sklearn.metrics import classification_report, f1_score
 import xgboost as xgb
 import numpy as np
 
@@ -103,6 +104,9 @@ def classification_loss(y_pred, y_true, class_weights=None):
     
     return loss_fn(y_pred, y_true)
 
+# def l1_reg(model, lambda_l1=1e-4):
+#     return lambda_l1 * sum(param.abs().sum() for param in model.parameters())
+
 def train(train_loader, val_loader, input_dim, hidden_layers, latent_dim, epochs=10, lr=0.001):
     autoencoder = Autoencoder(input_dim, hidden_layers, latent_dim)
     optimizer = optim.AdamW(autoencoder.parameters(), lr=lr, weight_decay=0.001)
@@ -198,6 +202,9 @@ def train_xgboost_classifier(latent_train, y_train, latent_val, y_val):
 def train_combined(train_loader, val_loader, input_dim, hidden_layers, latent_dim, num_classes, epochs=10, lr=0.001, alpha=0.5, class_weights=None):
     model = CombinedModel(input_dim, hidden_layers, latent_dim, num_classes)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.001)
+
+    best_f1 = 0.0  # Store the best macro F1 score
+    best_model_weights = None  # Store best model parameters
     
     for epoch in range(epochs):
         model.train()
@@ -207,6 +214,7 @@ def train_combined(train_loader, val_loader, input_dim, hidden_layers, latent_di
         for x, y in train_progress:
             x_hat, y_pred, _ = model(x)
             loss = combined_loss(x, x_hat, y_pred, y, alpha, class_weights)
+            #loss += l1_reg(model)
             
             optimizer.zero_grad()
             loss.backward()
@@ -218,14 +226,31 @@ def train_combined(train_loader, val_loader, input_dim, hidden_layers, latent_di
         
         # Validation loss
         model.eval()
+        y_true = []
+        y_pred = []
         total_val_loss = 0.0
         with torch.no_grad():
             for x, y in val_loader:
-                x_hat, y_pred, _ = model(x)
-                loss = combined_loss(x, x_hat, y_pred, y, alpha, class_weights)
+                x_hat, y_logits, _ = model(x)
+                y_pred_batch = torch.argmax(y_logits, dim=1)
+                y_true.extend(y.cpu().numpy())
+                y_pred.extend(y_pred_batch.cpu().numpy())
+                loss = combined_loss(x, x_hat, y_logits, y, alpha, class_weights)
                 total_val_loss += loss.item()
         
         avg_val_loss = total_val_loss / len(val_loader)
+        macro_f1 = f1_score(y_true, y_pred, average='macro')
+
         print(f"Epoch {epoch+1}: Train Loss = {avg_train_loss:.4f}, Val Loss = {avg_val_loss:.4f}")
+        print(classification_report(y_true, y_pred))
+
+        if macro_f1 > best_f1:
+            best_f1 = macro_f1
+            best_model_weights = model.state_dict()
+            torch.save(best_model_weights, "model_combined_best.pth")
+            print(f"New best model saved with Macro F1 = {macro_f1:.4f}")
+
+    if best_model_weights:
+        model.load_state_dict(best_model_weights)
     
     return model
