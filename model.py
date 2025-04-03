@@ -23,6 +23,22 @@ class Encoder(nn.Module):
     
     def forward(self, x):
         return self.network(x)
+
+class Decoder(nn.Module):
+    def __init__(self, input_dim, hidden_layers, latent_dim, activation=nn.Tanh):
+        super(Decoder, self).__init__()
+        layers = []
+        prev_dim = latent_dim
+        for hidden_dim in reversed(hidden_layers):
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            #layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(activation())
+            prev_dim = hidden_dim
+        layers.append(nn.Linear(prev_dim, input_dim))
+        self.network = nn.Sequential(*layers)
+    
+    def forward(self, z):
+        return self.network(z)
     
 class PrototypeLayer(nn.Module):
     def __init__(self, num_prototypes, latent_dim, num_classes):
@@ -42,6 +58,7 @@ class ProtoPNet(nn.Module):
         self.epsilon = 1e-4
         
         self.encoder = Encoder(input_dim, hidden_layers, latent_dim, activation)
+        self.decoder = Decoder(input_dim, hidden_layers, latent_dim, activation)
         self.proto_layer = PrototypeLayer(num_prototypes, latent_dim, num_classes)
         self.last_layer = nn.Linear(num_prototypes, num_classes, bias=False)
         
@@ -63,18 +80,20 @@ class ProtoPNet(nn.Module):
     
     def forward(self, x):
         z = self.encoder(x)
+        x_hat = self.decoder(z)
         distances = self.proto_layer(z)
         similarity_scores = torch.log((distances + 1) / (distances + self.epsilon))
         #similarity_scores = torch.log(1 + distances)
         logits = self.last_layer(similarity_scores)
-        return z, distances, logits
+        return x_hat, z, distances, logits
                 
 
-def proto_loss(y_pred, y_true, prototype_distances, prototype_labels, class_weights=None, lambda_clst=0.8, lambda_sep=0.08):
+def proto_loss(y_pred, y_true, x_hat, x, prototype_distances, prototype_labels, class_weights=None, lambda_clst=0.8, lambda_sep=0.08, alpha=0.5):
     
     # Cross-entropy classification loss
     loss_fn = nn.CrossEntropyLoss(weight=class_weights)
     class_loss = loss_fn(y_pred, y_true)
+    recon_loss = nn.MSELoss()(x_hat, x)
 
     # Encourages each sample to be close to at least one prototype of the same class.
     # For each sample, find the prototype of its correct class that is closest.
@@ -91,7 +110,7 @@ def proto_loss(y_pred, y_true, prototype_distances, prototype_labels, class_weig
     sep_distances[~incorrect_class_mask] = float('inf')
     L_sep = -torch.mean(torch.min(sep_distances, dim=1)[0])
     
-    return class_loss + lambda_clst * L_clst + lambda_sep * L_sep
+    return alpha * class_loss + (1. - alpha) * recon_loss + lambda_clst * L_clst + lambda_sep * L_sep
 
 def push(model, train_loader):
     
@@ -105,7 +124,7 @@ def push(model, train_loader):
     
     with torch.no_grad():
         for x, y in train_loader:
-            z, _, _ = model(x)
+            _, z, _, _ = model(x)
             
             for j, p in enumerate(model.proto_layer.prototypes):
                 # Get the class of the current prototype
@@ -140,7 +159,7 @@ def train_last_layer(model:ProtoPNet, train_loader, lr=0.0001, epochs=1, class_w
         for x, y in train_loader:
 
             with torch.no_grad():  # Freeze encoder & prototype layer
-                z, _, _ = model(x)
+                _, z, _, _ = model(x)
                 distances = model.proto_layer(z)
                 similarity_scores = torch.log((distances + 1) / (distances + 1e-4))
 
@@ -160,7 +179,8 @@ def train_protopnet(model, train_loader, val_loader, epochs, lr=0.001, class_wei
     print(class_weights)
     # Optimizer for convolutional layers (except last layer)
     feature_optimizer = optim.AdamW(list(model.encoder.parameters()) + list(model.proto_layer.parameters()), lr=lr)
-    
+    best_f1 = 0.0 
+    best_model_weights = None
     for epoch in range(epochs):
         print(f"\nEpoch {epoch+1}/{epochs}")
 
@@ -171,9 +191,9 @@ def train_protopnet(model, train_loader, val_loader, epochs, lr=0.001, class_wei
         for x, y in train_loader:
             feature_optimizer.zero_grad()
 
-            z, prototype_distances, logits = model(x)
+            x_hat, z, prototype_distances, logits = model(x)
             #loss = proto_loss_v(model, logits, y, prototype_distances, class_weights=class_weights)
-            loss = proto_loss(logits, y, prototype_distances, model.proto_layer.prototype_labels, lambda_clst=lambda_clst, lambda_sep=lambda_sep)
+            loss = proto_loss(logits, y, x_hat, x, prototype_distances, model.proto_layer.prototype_labels, lambda_clst=lambda_clst, lambda_sep=lambda_sep)
 
             loss.backward()
             feature_optimizer.step()
@@ -194,21 +214,19 @@ def train_protopnet(model, train_loader, val_loader, epochs, lr=0.001, class_wei
 
         # Evaluate on validation set
         if val_loader:
-            evaluate(model, val_loader, epoch=epoch, class_weights=class_weights)
+            evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=class_weights)
 
-def evaluate(model, val_loader, epoch, class_weights=None):
+def evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=None):
 
     model.eval()
     y_true = []
     y_pred = []
-    best_f1 = 0.0 
-    best_model_weights = None
     loss_fn = nn.CrossEntropyLoss(weight=class_weights)
     total_val_loss = 0.0
 
     with torch.no_grad():
         for x, y in val_loader:
-            _, _, logits = model(x)
+            _, _, _, logits = model(x)
             y_pred_batch = torch.argmax(logits, dim=1)
             y_true.extend(y.cpu().numpy())
             y_pred.extend(y_pred_batch.cpu().numpy())
@@ -224,7 +242,7 @@ def evaluate(model, val_loader, epoch, class_weights=None):
     if macro_f1 > best_f1:
         best_f1 = macro_f1
         best_model_weights = model.state_dict()
-        torch.save(best_model_weights, "model_ppnet_best_copy.pth")
+        torch.save(best_model_weights, "model_ppnet_best_dec.pth")
         print(f"New best model saved with Macro F1 = {macro_f1:.4f}")
 
     if best_model_weights:
