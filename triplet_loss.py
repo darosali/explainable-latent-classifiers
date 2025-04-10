@@ -1,0 +1,52 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def triplet_loss(model, X, y, margin=1.0):
+    _, z, _, _ = model(X)
+    unique_types = y.unique()
+    num_types = unique_types.numel()
+    
+    anomaly_prototypes = model.proto_layer.prototypes[-num_types:]
+    
+    total_loss = 0.
+    total_triplets = 0
+    
+    for i, anomaly_type in enumerate(unique_types):
+        
+        anchor = anomaly_prototypes[i]
+        
+        pos_mask = (y == anomaly_type)
+        pos_samples = z[pos_mask]
+        if pos_samples.shape[0] <= 0:
+            continue
+        
+        neg_mask = (y != anomaly_type)
+        neg_samples = X[neg_mask]
+        
+        pos_dists = torch.norm(anchor - pos_samples, dim=1)
+        neg_dists = torch.norm(anchor - neg_samples, dim=1)
+        
+        for pos_dist in pos_dists:
+            losses = F.relu(margin + pos_dist - neg_dists)
+            total_loss += losses.sum()
+            total_triplets += neg_dists.size(0)
+        
+    if total_triplets > 0:
+        total_loss = total_loss / total_triplets
+        print(total_triplets)
+    
+    return total_loss
+
+# if __name__ == "__main__":
+#     anchors = torch.tensor([[0.0, 0.0],
+#                            [1.0, 1.0]])
+#     X = torch.tensor([
+#                     [0.5, 0.5],
+#                     [0.4, 0.6],
+#                     [1.0, 0.5],
+#                     [0.9, 0.6],
+#                     [1.1, 0.4]])
+#     y = torch.tensor([0, 0, 1, 1, 1])
+#     print(y.numpy())
+#     print(triplet_loss(anchors, X, y))
