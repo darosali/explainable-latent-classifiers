@@ -6,6 +6,7 @@ from tqdm.notebook import tqdm
 from sklearn.metrics import classification_report, f1_score
 import xgboost as xgb
 import numpy as np
+from triplet_loss import *
 
 
 class Encoder(nn.Module):
@@ -41,17 +42,21 @@ class Decoder(nn.Module):
         return self.network(z)
     
 class PrototypeLayer(nn.Module):
-    def __init__(self, num_prototypes, latent_dim, num_classes):
+    def __init__(self, num_prototypes, num_neg, latent_dim, num_classes):
         super(PrototypeLayer, self).__init__()
         self.prototypes = nn.Parameter(torch.randn(num_prototypes, latent_dim))
-        self.prototype_labels = torch.arange(num_prototypes) % num_classes
+        #self.prototype_labels = torch.arange(num_prototypes) % num_classes
+        self.prototype_labels = torch.cat([
+            torch.zeros(num_neg, dtype=torch.long),
+            torch.ones(num_prototypes - num_neg, dtype=torch.long)
+        ])
         
     def forward(self, x):
         distances = torch.cdist(x, self.prototypes)
         return distances
 
 class ProtoPNet(nn.Module):
-    def __init__(self, input_dim, hidden_layers, num_prototypes, num_classes, latent_dim, activation = nn.Tanh, init_weights=True):
+    def __init__(self, input_dim, hidden_layers, num_prototypes, num_neg, num_classes, latent_dim, activation = nn.Tanh, init_weights=True):
         super(ProtoPNet, self).__init__()
         self.num_prototypes = num_prototypes
         self.num_classes = num_classes
@@ -59,7 +64,7 @@ class ProtoPNet(nn.Module):
         
         self.encoder = Encoder(input_dim, hidden_layers, latent_dim, activation)
         self.decoder = Decoder(input_dim, hidden_layers, latent_dim, activation)
-        self.proto_layer = PrototypeLayer(num_prototypes, latent_dim, num_classes)
+        self.proto_layer = PrototypeLayer(num_prototypes, num_neg, latent_dim, num_classes)
         self.last_layer = nn.Linear(num_prototypes, num_classes, bias=False)
         
         if init_weights:
@@ -214,7 +219,50 @@ def train_protopnet(model, train_loader, val_loader, epochs, lr=0.001, class_wei
 
         # Evaluate on validation set
         if val_loader:
-            evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=class_weights)
+            best_f1, best_model_weights = evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=class_weights)
+
+def train_protopnet_triplet(model, train_loader, val_loader, epochs, X_triplet, y_triplet, lr=0.001, class_weights=None, lambda_triplet=0.5, lambda_clst=0.8, lambda_sep=0.08):
+    print(class_weights)
+    # Optimizer for convolutional layers (except last layer)
+    feature_optimizer = optim.AdamW(list(model.encoder.parameters()) + list(model.proto_layer.parameters()), lr=lr)
+    best_f1 = 0.0 
+    best_model_weights = None
+    for epoch in range(epochs):
+        print(f"\nEpoch {epoch+1}/{epochs}")
+
+        # --- Phase 1: Stochastic Gradient Descent (SGD) ---
+        model.train()
+        total_loss = 0.0
+        train_progress = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} [Training]")
+        for x, y in train_loader:
+            feature_optimizer.zero_grad()
+
+            x_hat, z, prototype_distances, logits = model(x)
+            #loss = proto_loss_v(model, logits, y, prototype_distances, class_weights=class_weights)
+            loss = proto_loss(logits, y, x_hat, x, prototype_distances, model.proto_layer.prototype_labels, lambda_clst=lambda_clst, lambda_sep=lambda_sep)
+            t_loss = triplet_loss(model, X_triplet, y_triplet)
+            loss += lambda_triplet * t_loss
+
+            loss.backward()
+            feature_optimizer.step()
+            total_loss += loss.item()
+            train_progress.set_postfix(loss=loss.item())
+            train_progress.update(1)
+
+        print(f"Phase 1 - Training Loss: {total_loss / len(train_loader):.4f}")
+
+        # --- Phase 2: Prototype Projection ---
+        model.eval()
+        push(model, train_loader)
+        print("Phase 2 - Prototype Projection Completed")
+
+        # --- Phase 3: Last Layer Optimization ---
+        train_last_layer(model, train_loader, lr=lr, epochs=1, class_weights=class_weights)
+        print("Phase 3 - Last Layer Optimization Completed")
+
+        # Evaluate on validation set
+        if val_loader:
+            best_f1, best_model_weights = evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=class_weights)
 
 def evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=None):
 
@@ -242,11 +290,13 @@ def evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weight
     if macro_f1 > best_f1:
         best_f1 = macro_f1
         best_model_weights = model.state_dict()
-        torch.save(best_model_weights, "model_ppnet_best_dec.pth")
+        torch.save(best_model_weights, "model_ppnet_best_dec_10.pth")
         print(f"New best model saved with Macro F1 = {macro_f1:.4f}")
 
     if best_model_weights:
         model.load_state_dict(best_model_weights)
+        
+    return best_f1, best_model_weights
 
 
 if __name__ == "__main__":
