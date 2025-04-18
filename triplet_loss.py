@@ -22,7 +22,7 @@ def triplet_loss(model, X, y, margin=1.0):
             continue
         
         neg_mask = (y != anomaly_type)
-        neg_samples = X[neg_mask]
+        neg_samples = z[neg_mask]
         
         pos_dists = torch.norm(anchor - pos_samples, dim=1)
         neg_dists = torch.norm(anchor - neg_samples, dim=1)
@@ -34,19 +34,5 @@ def triplet_loss(model, X, y, margin=1.0):
         
     if total_triplets > 0:
         total_loss = total_loss / total_triplets
-        print(total_triplets)
     
     return total_loss
-
-# if __name__ == "__main__":
-#     anchors = torch.tensor([[0.0, 0.0],
-#                            [1.0, 1.0]])
-#     X = torch.tensor([
-#                     [0.5, 0.5],
-#                     [0.4, 0.6],
-#                     [1.0, 0.5],
-#                     [0.9, 0.6],
-#                     [1.1, 0.4]])
-#     y = torch.tensor([0, 0, 1, 1, 1])
-#     print(y.numpy())
-#     print(triplet_loss(anchors, X, y))
