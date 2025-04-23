@@ -50,6 +50,8 @@ class PrototypeLayer(nn.Module):
             torch.zeros(num_neg, dtype=torch.long),
             torch.ones(num_prototypes - num_neg, dtype=torch.long)
         ])
+        labels = torch.arange(1, 6)
+        self.prototype_labels_multi = labels.repeat_interleave((num_prototypes - num_neg) // 5)
         
     def forward(self, x):
         distances = torch.cdist(x, self.prototypes)
@@ -221,8 +223,8 @@ def train_protopnet(model, train_loader, val_loader, epochs, lr=0.001, class_wei
         if val_loader:
             best_f1, best_model_weights = evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=class_weights)
 
-def train_protopnet_triplet(model, train_loader, val_loader, epochs, X_triplet, y_triplet, lr=0.001, class_weights=None, lambda_triplet=0.5, lambda_clst=0.8, lambda_sep=0.08):
-    print(class_weights)
+def train_protopnet_triplet(model, train_loader, val_loader, epochs, X_triplet, y_triplet, lr=0.001, class_weights=None, lambda_triplet=0.5, lambda_clst=0.8, lambda_sep=0.08, filepath="model_ppnet_best_triplet.pth"):
+    print(lambda_triplet)
     # Optimizer for convolutional layers (except last layer)
     feature_optimizer = optim.AdamW(list(model.encoder.parameters()) + list(model.proto_layer.parameters()), lr=lr)
     best_f1 = 0.0 
@@ -262,9 +264,9 @@ def train_protopnet_triplet(model, train_loader, val_loader, epochs, X_triplet, 
 
         # Evaluate on validation set
         if val_loader:
-            best_f1, best_model_weights = evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=class_weights)
+            best_f1, best_model_weights = evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=class_weights, filepath=filepath)
 
-def evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=None):
+def evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weights=None, filepath="model_ppnet_triplet_xor.pth"):
 
     model.eval()
     y_true = []
@@ -290,7 +292,7 @@ def evaluate(model, val_loader, epoch, best_f1, best_model_weights, class_weight
     if macro_f1 > best_f1:
         best_f1 = macro_f1
         best_model_weights = model.state_dict()
-        torch.save(best_model_weights, "model_ppnet_best_dec_10.pth")
+        torch.save(best_model_weights, filepath)
         print(f"New best model saved with Macro F1 = {macro_f1:.4f}")
 
     if best_model_weights:
