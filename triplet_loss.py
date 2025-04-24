@@ -6,13 +6,15 @@ def triplet_loss(model, X, y, margin=1.0):
     _, z, _, _ = model(X)
     unique_types = y.unique()
     num_types = unique_types.numel()
-    
-    anomaly_prototypes = model.proto_layer.prototypes[-num_types:]
+
+    #anomaly_prototypes = model.proto_layer.prototypes[-num_types:]
+    anomaly_prototypes = model.proto_layer.prototypes[model.proto_layer.prototype_labels != 0]
+    anomaly_proto_labels = model.proto_layer.prototype_labels_multi
     
     total_loss = 0.
     total_triplets = 0
     
-    for i, anomaly_type in enumerate(unique_types):
+    for i, anomaly_type in enumerate(anomaly_proto_labels):
         
         anchor = anomaly_prototypes[i]
         
